@@ -831,9 +831,11 @@ class RadosJSON:
             )
 
         _, _, err = self.endpoint_dial(monitoring_endpoint, ip_type)
+        sys.stderr.write("nigoyal1", monitoring_endpoint,ip_type)
         if err == "-1":
             raise ExecutionFailureException(err)
         # add the validated active mgr IP into the first index
+        sys.stderr.write("nigoyal2", monitoring_endpoint_ip,mgr_ips, all_mgr_ips_str)
         mgr_ips.insert(0, monitoring_endpoint_ip)
         all_mgr_ips_str = ",".join(mgr_ips)
         return all_mgr_ips_str, monitoring_endpoint_port
