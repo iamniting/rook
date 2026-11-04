@@ -78,6 +78,22 @@ type osdInfoBlock struct {
 	Type      string `json:"type"`
 }
 
+// blueStoreLabel describes a device entry in ceph-bluestore-tool show-label output.
+// BlueStore metadata values, including whoami and bluefs, are encoded as strings.
+type blueStoreLabel struct {
+	BlueFS      string `json:"bluefs"`
+	BirthTime   string `json:"btime"`
+	CephFSID    string `json:"ceph_fsid"`
+	Description string `json:"description"`
+	KVBackend   string `json:"kv_backend"`
+	MkfsDone    string `json:"mkfs_done"`
+	OSDUUID     string `json:"osd_uuid"`
+	Ready       string `json:"ready"`
+	Size        uint64 `json:"size"`
+	Type        string `json:"type"`
+	Whoami      string `json:"whoami"`
+}
+
 type osdInfo struct {
 	Name string  `json:"name"`
 	Path string  `json:"path"`
@@ -1091,6 +1107,72 @@ func (a *OsdAgent) WipeDevicesFromOtherClusters(context *clusterd.Context) error
 	}
 
 	if len(existingOSDs) == 0 {
+
+		for _, disk := range context.Devices {
+			if disk.Filesystem != "crypto_LUKS" {
+				output, err := context.Executor.ExecuteCommandWithCombinedOutput("ceph-bluestore-tool", "show-label", "--dev", disk.RealPath)
+				if err != nil {
+					// Non-fatal: device may not have BlueStore signatures
+					logger.Warningf("ceph-bluestore-tool show-label failed for %q (may not have BlueStore data): %s. %v", disk.RealPath, output, err)
+					continue
+				}
+
+				var labels map[string]blueStoreLabel
+				err = json.Unmarshal([]byte(output), &labels)
+				if err != nil {
+					return errors.Wrapf(err, "failed to unmarshal ceph-bluestore-tool show-label output for %q", disk.RealPath)
+				}
+
+				if len(labels) == 0 {
+					logger.Infof("cleaning disk %q (%q)", disk.Name, disk.RealPath)
+					if err := ZapDevice(context, disk.RealPath); err != nil {
+						return errors.Wrapf(err, "failed to zap disk %q", disk.RealPath)
+					}
+				}
+
+				osdUUID := ""
+				for _, osdLabels := range labels {
+					osdUUID = osdLabels.OSDUUID
+				}
+
+				osdDump, err := client.GetOSDDump(context, a.clusterInfo)
+				if err != nil {
+					return errors.Wrapf(err, "failed to get osd dump")
+
+				}
+
+				for _, osdDetails := range osdDump.OSDs {
+					if osdDetails.UUID == osdUUID {
+
+						n, err := osdDetails.OSD.Int64()
+						if err != nil {
+							return err
+						}
+						osdId := int(n)
+
+						isSafe, err := client.OsdSafeToDestroy(context, a.clusterInfo, osdId)
+						if err != nil {
+							return errors.Wrapf(err, "failed to get osd dump")
+						}
+
+						if isSafe {
+							if err := ZapDevice(context, disk.RealPath); err != nil {
+								return errors.Wrapf(err, "failed to zap disk %q", disk.RealPath)
+							}
+
+						}
+
+					} else {
+						if err := ZapDevice(context, disk.RealPath); err != nil {
+							return errors.Wrapf(err, "failed to zap disk %q", disk.RealPath)
+						}
+					}
+				}
+
+			}
+
+		}
+
 		// ceph-volume raw list didn't return any existing OSDs. It's possible that /dev/mapper entries of the encrypted disks were removed.
 		// Check for cephFSID in the luks header of the disk and clean the disk if it does not match the cephFSID of the current cluster.
 		logger.Infof("ceph-volume didn't return any existing OSDs. Checking for cephFSID of a different cluster in the luks header of the disk")
