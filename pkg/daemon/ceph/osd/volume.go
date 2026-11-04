@@ -36,6 +36,7 @@ import (
 	oposd "github.com/rook/rook/pkg/operator/ceph/cluster/osd"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/osd/config"
 	"github.com/rook/rook/pkg/util/display"
+	"github.com/rook/rook/pkg/util/log"
 	"github.com/rook/rook/pkg/util/sys"
 )
 
@@ -1050,10 +1051,13 @@ func unmountDevice(context *clusterd.Context, devicePath string) error {
 	return nil
 }
 
-// WipeDevicesFromOtherClusters wipes the OSD backed disks if they have metadata from a different ceph cluster.
-// The wiped disks can then be used to prepare OSDs for the current ceph cluster.
+// WipeDevicesFromOtherClusters wipes eligible devices containing metadata
+// from another Ceph cluster or an interrupted OSD preparation attempt,
+// allowing them to be reused for OSD preparation in the current cluster.
 func (a *OsdAgent) WipeDevicesFromOtherClusters(context *clusterd.Context) error {
 	args := []string{"raw", "list", "--format", "json"}
+
+	log.LogAsJSON(logger.Debugf, "Devices", context.Devices)
 
 	result, err := callCephVolume(context, args...)
 	if err != nil {
@@ -1074,7 +1078,6 @@ func (a *OsdAgent) WipeDevicesFromOtherClusters(context *clusterd.Context) error
 		if err != nil {
 			return errors.Wrapf(err, "failed to clean up encrypted disks from other clusters")
 		}
-		return nil
 	}
 
 	for _, existingOSD := range existingOSDs {
@@ -1110,7 +1113,7 @@ func (a *OsdAgent) WipeDevicesFromOtherClusters(context *clusterd.Context) error
 		}
 	}
 
-	return nil
+	return a.wipeIncompleteOSDDeviceOnPVC(context, existingOSDs)
 }
 
 func wipeEncryptedDevicesFromOtherClusters(context *clusterd.Context, currentClusterFSID string) error {
@@ -1631,4 +1634,35 @@ func GetBackingDeviceForEncryptedBlock(context *clusterd.Context, disk string) (
 	}
 
 	return "", errors.Errorf("failed to find backing device for encrypted block %q", disk)
+}
+
+func GetEncryptedBlocksForBackingDevice(context *clusterd.Context, devicePath string) ([]string, error) {
+	output, err := context.Executor.ExecuteCommandWithOutput(
+		"lsblk", "-Jplo", "NAME,TYPE", devicePath,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to run lsblk on %q: %w", devicePath, err)
+	}
+
+	logger.Debugf("%v", output)
+
+	var result struct {
+		BlockDevices []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"blockdevices"`
+	}
+
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		return nil, fmt.Errorf("failed to decode lsblk output: %w", err)
+	}
+
+	var mapperDevices []string
+	for _, device := range result.BlockDevices {
+		if device.Type == "crypt" {
+			mapperDevices = append(mapperDevices, device.Name)
+		}
+	}
+
+	return mapperDevices, nil
 }
